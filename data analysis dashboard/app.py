@@ -277,6 +277,14 @@ temporal_interval = st.sidebar.radio(
     help="Aggregate and analyze financial metrics across standard time intervals"
 )
 
+# View Selector
+chart_view = st.sidebar.radio(
+    "Select Chart View:",
+    options=["All Charts", "Bar Chart Only", "Pie Chart Only"],
+    index=0,
+    help="Switch between viewing all charts side-by-side or focusing on an individual chart full-width"
+)
+
 st.sidebar.markdown("<hr style='border: 0; border-top: 1px solid rgba(56, 189, 248, 0.2); margin: 20px 0;'>", unsafe_allow_html=True)
 
 # 3. CSV File Uploader targeted exclusively at .csv files
@@ -392,14 +400,57 @@ if "account" in [c.lower() for c in df.columns]:
     account_col_name = [c for c in df.columns if c.lower() == "account"][0]
     if selected_accounts:
         # Match case-insensitively
-        active_df = df[df[account_col_name].astype(str).str.lower().isin([a.lower() for a in selected_accounts])].copy()
-        if active_df.empty:
+        filtered_df = df[df[account_col_name].astype(str).str.lower().isin([a.lower() for a in selected_accounts])].copy()
+        if filtered_df.empty:
             st.warning("⚠️ No records match the selected accounts. Showing full dataset.")
-            active_df = df.copy()
+            filtered_df = df.copy()
     else:
-        active_df = df.copy()
+        filtered_df = df.copy()
 else:
-    active_df = df.copy()
+    filtered_df = df.copy()
+
+# Date Column Detection & Dynamic Temporal Aggregation
+time_view = temporal_interval  # "Monthly", "Weekly", "Daily"
+date_col_candidates = [c for c in filtered_df.columns if str(c).strip().lower() in ["date", "datetime", "timestamp", "transaction_date", "trans_date"]]
+date_col = date_col_candidates[0] if date_col_candidates else None
+
+if date_col is not None:
+    try:
+        # Convert date column to datetime
+        filtered_df[date_col] = pd.to_datetime(filtered_df[date_col])
+        
+        # Determine temporal aggregation period/date
+        if time_view == "Daily":
+            filtered_df["_period"] = filtered_df[date_col].dt.date
+        elif time_view == "Weekly":
+            filtered_df["_period"] = filtered_df[date_col].dt.to_period("W").dt.to_timestamp()
+        else:  # "Monthly"
+            filtered_df["_period"] = filtered_df[date_col].dt.to_period("M").dt.to_timestamp()
+            
+        # Get numeric columns for financial aggregation (e.g. 'amount')
+        numeric_cols_for_agg = filtered_df.select_dtypes(include=["number"]).columns.tolist()
+        
+        # Categorical columns to preserve for Payment Methods & Receiving Methods breakdown
+        cat_cols_for_agg = [
+            c for c in filtered_df.select_dtypes(include=["object", "category", "string"]).columns 
+            if c != date_col and c != "_period"
+        ]
+        
+        # If numeric columns exist, aggregate dynamically so chart heights and slices change instantly
+        if numeric_cols_for_agg:
+            group_keys = ["_period"] + cat_cols_for_agg
+            active_df = filtered_df.groupby(group_keys, as_index=False, dropna=False)[numeric_cols_for_agg].sum()
+            active_df[date_col] = active_df["_period"]
+        else:
+            active_df = filtered_df.copy()
+            active_df[date_col] = active_df["_period"]
+            
+    except Exception as e:
+        st.info(f"ℹ️ Could not parse '{date_col}' as datetime: {e}. Displaying standard records.")
+        active_df = filtered_df.copy()
+else:
+    st.info("ℹ️ No 'Date' column detected for temporal grouping. To enable dynamic Monthly/Weekly/Daily aggregation, ensure your CSV includes a 'Date' or 'date' column.")
+    active_df = filtered_df.copy()
 
 # Auto-detect columns dynamically
 cat_cols, num_cols, default_pay_col, default_recv_col, default_val_col = get_column_recommendations(active_df)
@@ -457,224 +508,231 @@ with kpi_col4:
 st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
 
 # ==============================================================================
-# Responsive Grid Layout (Dual Columns)
+# Chart Rendering Functions & Conditional Layout
 # ==============================================================================
-left_col, right_col = st.columns(2)
-
-# Custom enterprise color palettes matching the abstract blue/cyan gradient aesthetic
 custom_bar_colors = ["#00f0ff", "#38bdf8", "#0284c7", "#2563eb", "#6366f1", "#8b5cf6", "#a855f7", "#ec4899"]
 custom_pie_colors = ["#38bdf8", "#0ea5e9", "#2563eb", "#6366f1", "#818cf8", "#34d399", "#2dd4bf", "#f43f5e"]
 
-# ------------------------------------------------------------------------------
-# Left Column: Interactive Bar Chart ("Payment Methods")
-# ------------------------------------------------------------------------------
-with left_col:
-    st.markdown("""
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <h3 style="margin: 0; font-size: 1.25rem; color: #ffffff;">💳 Payment Methods</h3>
-        <span style="font-size: 0.8rem; color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 3px 8px; border-radius: 4px;">
-            Interactive Bar Chart
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
+def render_bar_chart(container):
+    """Renders the Payment Methods Interactive Bar Chart inside the specified container/column."""
+    with container:
+        st.markdown("""
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <h3 style="margin: 0; font-size: 1.25rem; color: #ffffff;">💳 Payment Methods</h3>
+            <span style="font-size: 0.8rem; color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 3px 8px; border-radius: 4px;">
+                Interactive Bar Chart
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Dynamic Column Bindings with smart fallbacks
-    with st.expander("⚙️ Customize Axis & Aggregations", expanded=False):
-        c_pay1, c_pay2, c_pay3 = st.columns(3)
-        with c_pay1:
-            selected_pay_col = st.selectbox(
-                "Category (X-Axis):",
-                options=cat_cols if cat_cols else active_df.columns.tolist(),
-                index=cat_cols.index(default_pay_col) if default_pay_col in cat_cols else 0,
-                key="sb_pay_cat"
-            )
-        with c_pay2:
-            val_options = ["Transaction Count"] + num_cols
-            default_val_idx = (val_options.index(default_val_col)) if default_val_col in val_options else 0
-            selected_pay_val = st.selectbox(
-                "Metric (Y-Axis):",
-                options=val_options,
-                index=default_val_idx,
-                key="sb_pay_val"
-            )
-        with c_pay3:
-            pay_agg_mode = st.selectbox(
-                "Aggregation:",
-                options=["Sum", "Average", "Count"] if selected_pay_val != "Transaction Count" else ["Count"],
-                index=0,
-                key="sb_pay_agg"
-            )
+        # Dynamic Column Bindings with smart fallbacks
+        with st.expander("⚙️ Customize Axis & Aggregations", expanded=False):
+            c_pay1, c_pay2, c_pay3 = st.columns(3)
+            with c_pay1:
+                selected_pay_col = st.selectbox(
+                    "Category (X-Axis):",
+                    options=cat_cols if cat_cols else active_df.columns.tolist(),
+                    index=cat_cols.index(default_pay_col) if default_pay_col in cat_cols else 0,
+                    key="sb_pay_cat"
+                )
+            with c_pay2:
+                val_options = ["Transaction Count"] + num_cols
+                default_val_idx = (val_options.index(default_val_col)) if default_val_col in val_options else 0
+                selected_pay_val = st.selectbox(
+                    "Metric (Y-Axis):",
+                    options=val_options,
+                    index=default_val_idx,
+                    key="sb_pay_val"
+                )
+            with c_pay3:
+                pay_agg_mode = st.selectbox(
+                    "Aggregation:",
+                    options=["Sum", "Average", "Count"] if selected_pay_val != "Transaction Count" else ["Count"],
+                    index=0,
+                    key="sb_pay_agg"
+                )
 
-    # Compute aggregation
-    if selected_pay_val == "Transaction Count" or pay_agg_mode == "Count":
-        bar_df = (
-            active_df.groupby(selected_pay_col, as_index=False)
-            .size()
-            .rename(columns={"size": "Count"})
-        )
-        y_axis_name = "Count"
-        y_title = "Total Transactions"
-    else:
-        if pay_agg_mode == "Average":
+        # Compute aggregation
+        if selected_pay_val == "Transaction Count" or pay_agg_mode == "Count":
             bar_df = (
-                active_df.groupby(selected_pay_col, as_index=False)[selected_pay_val]
-                .mean()
-                .rename(columns={selected_pay_val: "Average Amount"})
+                active_df.groupby(selected_pay_col, as_index=False)
+                .size()
+                .rename(columns={"size": "Count"})
             )
-            y_axis_name = "Average Amount"
-            y_title = f"Avg {selected_pay_val}"
+            y_axis_name = "Count"
+            y_title = "Total Transactions"
         else:
-            bar_df = (
-                active_df.groupby(selected_pay_col, as_index=False)[selected_pay_val]
+            if pay_agg_mode == "Average":
+                bar_df = (
+                    active_df.groupby(selected_pay_col, as_index=False)[selected_pay_val]
+                    .mean()
+                    .rename(columns={selected_pay_val: "Average Amount"})
+                )
+                y_axis_name = "Average Amount"
+                y_title = f"Avg {selected_pay_val}"
+            else:
+                bar_df = (
+                    active_df.groupby(selected_pay_col, as_index=False)[selected_pay_val]
+                    .sum()
+                    .rename(columns={selected_pay_val: "Total Amount"})
+                )
+                y_axis_name = "Total Amount"
+                y_title = f"Sum of {selected_pay_val}"
+
+        # Sort descending for clean visual hierarchy
+        bar_df = bar_df.sort_values(by=y_axis_name, ascending=False)
+
+        # Render Plotly Bar Chart with plotly_dark template
+        fig_bar = px.bar(
+            bar_df,
+            x=selected_pay_col,
+            y=y_axis_name,
+            color=selected_pay_col,
+            color_discrete_sequence=custom_bar_colors,
+            template="plotly_dark",
+            labels={selected_pay_col: "Payment Method", y_axis_name: y_title}
+        )
+
+        fig_bar.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=25, b=10),
+            font=dict(color="#ffffff", family="Inter, sans-serif"),
+            showlegend=False,
+            hoverlabel=dict(
+                bgcolor="rgba(15, 23, 42, 0.95)",
+                bordercolor="#38bdf8",
+                font_size=13,
+                font_color="#ffffff"
+            ),
+            xaxis=dict(
+                showgrid=False,
+                color="#ffffff",
+                tickangle=-25,
+                title=dict(font=dict(color="#94a3b8", size=12))
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor="rgba(255, 255, 255, 0.08)",
+                color="#ffffff",
+                title=dict(font=dict(color="#94a3b8", size=12))
+            )
+        )
+        fig_bar.update_traces(
+            marker=dict(line=dict(width=1, color="rgba(255, 255, 255, 0.2)")),
+            hovertemplate="<b>%{x}</b><br>" + y_title + ": %{y:,.2f}<extra></extra>"
+        )
+
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+
+def render_pie_chart(container):
+    """Renders the Receiving Methods Interactive Pie/Donut Chart inside the specified container/column."""
+    with container:
+        st.markdown("""
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <h3 style="margin: 0; font-size: 1.25rem; color: #ffffff;">📥 Receiving Methods</h3>
+            <span style="font-size: 0.8rem; color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 3px 8px; border-radius: 4px;">
+                Interactive Donut Chart
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Dynamic Column Bindings with smart fallbacks
+        with st.expander("⚙️ Customize Slices & Metric", expanded=False):
+            c_recv1, c_recv2, c_recv3 = st.columns(3)
+            with c_recv1:
+                selected_recv_col = st.selectbox(
+                    "Category (Slices):",
+                    options=cat_cols if cat_cols else active_df.columns.tolist(),
+                    index=cat_cols.index(default_recv_col) if default_recv_col in cat_cols else 0,
+                    key="sb_recv_cat"
+                )
+            with c_recv2:
+                recv_val_options = ["Transaction Count"] + num_cols
+                default_recv_idx = (recv_val_options.index(default_val_col)) if default_val_col in recv_val_options else 0
+                selected_recv_val = st.selectbox(
+                    "Metric (Values):",
+                    options=recv_val_options,
+                    index=default_recv_idx,
+                    key="sb_recv_val"
+                )
+            with c_recv3:
+                chart_style = st.selectbox(
+                    "Style:",
+                    options=["Donut (Modern)", "Classic Pie"],
+                    index=0,
+                    key="sb_pie_style"
+                )
+
+        hole_ratio = 0.55 if chart_style == "Donut (Modern)" else 0.0
+
+        # Compute aggregation for Pie/Donut
+        if selected_recv_val == "Transaction Count":
+            pie_df = (
+                active_df.groupby(selected_recv_col, as_index=False)
+                .size()
+                .rename(columns={"size": "Volume"})
+            )
+            val_label = "Transactions"
+        else:
+            pie_df = (
+                active_df.groupby(selected_recv_col, as_index=False)[selected_recv_val]
                 .sum()
-                .rename(columns={selected_pay_val: "Total Amount"})
+                .rename(columns={selected_recv_val: "Volume"})
             )
-            y_axis_name = "Total Amount"
-            y_title = f"Sum of {selected_pay_val}"
+            val_label = selected_recv_val
 
-    # Sort descending for clean visual hierarchy
-    bar_df = bar_df.sort_values(by=y_axis_name, ascending=False)
-
-    # Render Plotly Bar Chart with plotly_dark template
-    fig_bar = px.bar(
-        bar_df,
-        x=selected_pay_col,
-        y=y_axis_name,
-        color=selected_pay_col,
-        color_discrete_sequence=custom_bar_colors,
-        template="plotly_dark",
-        labels={selected_pay_col: "Payment Method", y_axis_name: y_title}
-    )
-
-    fig_bar.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=25, b=10),
-        font=dict(color="#ffffff", family="Inter, sans-serif"),
-        showlegend=False,
-        hoverlabel=dict(
-            bgcolor="rgba(15, 23, 42, 0.95)",
-            bordercolor="#38bdf8",
-            font_size=13,
-            font_color="#ffffff"
-        ),
-        xaxis=dict(
-            showgrid=False,
-            color="#ffffff",
-            tickangle=-25,
-            title=dict(font=dict(color="#94a3b8", size=12))
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor="rgba(255, 255, 255, 0.08)",
-            color="#ffffff",
-            title=dict(font=dict(color="#94a3b8", size=12))
+        # Render Plotly Pie/Donut with plotly_dark template
+        fig_pie = px.pie(
+            pie_df,
+            names=selected_recv_col,
+            values="Volume",
+            hole=hole_ratio,
+            color_discrete_sequence=custom_pie_colors,
+            template="plotly_dark"
         )
-    )
-    fig_bar.update_traces(
-        marker=dict(line=dict(width=1, color="rgba(255, 255, 255, 0.2)")),
-        hovertemplate="<b>%{x}</b><br>" + y_title + ": %{y:,.2f}<extra></extra>"
-    )
 
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-# ------------------------------------------------------------------------------
-# Right Column: Interactive Pie/Donut Chart ("Receiving Methods")
-# ------------------------------------------------------------------------------
-with right_col:
-    st.markdown("""
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <h3 style="margin: 0; font-size: 1.25rem; color: #ffffff;">📥 Receiving Methods</h3>
-        <span style="font-size: 0.8rem; color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 3px 8px; border-radius: 4px;">
-            Interactive Donut Chart
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Dynamic Column Bindings with smart fallbacks
-    with st.expander("⚙️ Customize Slices & Metric", expanded=False):
-        c_recv1, c_recv2, c_recv3 = st.columns(3)
-        with c_recv1:
-            selected_recv_col = st.selectbox(
-                "Category (Slices):",
-                options=cat_cols if cat_cols else active_df.columns.tolist(),
-                index=cat_cols.index(default_recv_col) if default_recv_col in cat_cols else 0,
-                key="sb_recv_cat"
+        fig_pie.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=25, b=10),
+            font=dict(color="#ffffff", family="Inter, sans-serif"),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.25,
+                xanchor="center",
+                x=0.5,
+                font=dict(color="#ffffff", size=11)
+            ),
+            hoverlabel=dict(
+                bgcolor="rgba(15, 23, 42, 0.95)",
+                bordercolor="#38bdf8",
+                font_size=13,
+                font_color="#ffffff"
             )
-        with c_recv2:
-            recv_val_options = ["Transaction Count"] + num_cols
-            default_recv_idx = (recv_val_options.index(default_val_col)) if default_val_col in recv_val_options else 0
-            selected_recv_val = st.selectbox(
-                "Metric (Values):",
-                options=recv_val_options,
-                index=default_recv_idx,
-                key="sb_recv_val"
-            )
-        with c_recv3:
-            chart_style = st.selectbox(
-                "Style:",
-                options=["Donut (Modern)", "Classic Pie"],
-                index=0,
-                key="sb_pie_style"
-            )
-
-    hole_ratio = 0.55 if chart_style == "Donut (Modern)" else 0.0
-
-    # Compute aggregation for Pie/Donut
-    if selected_recv_val == "Transaction Count":
-        pie_df = (
-            active_df.groupby(selected_recv_col, as_index=False)
-            .size()
-            .rename(columns={"size": "Volume"})
         )
-        val_label = "Transactions"
-    else:
-        pie_df = (
-            active_df.groupby(selected_recv_col, as_index=False)[selected_recv_val]
-            .sum()
-            .rename(columns={selected_recv_val: "Volume"})
+        fig_pie.update_traces(
+            textposition="inside",
+            textinfo="percent+label",
+            insidetextfont=dict(color="#ffffff", size=11),
+            marker=dict(line=dict(color="rgba(10, 20, 48, 0.8)", width=2)),
+            hovertemplate="<b>%{label}</b><br>" + val_label + ": %{value:,.2f}<br>Share: %{percent}<extra></extra>"
         )
-        val_label = selected_recv_val
 
-    # Render Plotly Pie/Donut with plotly_dark template
-    fig_pie = px.pie(
-        pie_df,
-        names=selected_recv_col,
-        values="Volume",
-        hole=hole_ratio,
-        color_discrete_sequence=custom_pie_colors,
-        template="plotly_dark"
-    )
+        st.plotly_chart(fig_pie, use_container_width=True)
 
-    fig_pie.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=25, b=10),
-        font=dict(color="#ffffff", family="Inter, sans-serif"),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.25,
-            xanchor="center",
-            x=0.5,
-            font=dict(color="#ffffff", size=11)
-        ),
-        hoverlabel=dict(
-            bgcolor="rgba(15, 23, 42, 0.95)",
-            bordercolor="#38bdf8",
-            font_size=13,
-            font_color="#ffffff"
-        )
-    )
-    fig_pie.update_traces(
-        textposition="inside",
-        textinfo="percent+label",
-        insidetextfont=dict(color="#ffffff", size=11),
-        marker=dict(line=dict(color="rgba(10, 20, 48, 0.8)", width=2)),
-        hovertemplate="<b>%{label}</b><br>" + val_label + ": %{value:,.2f}<br>Share: %{percent}<extra></extra>"
-    )
 
-    st.plotly_chart(fig_pie, use_container_width=True)
+# Render layout conditionally based on selected view
+if chart_view == "All Charts":
+    left_col, right_col = st.columns(2)
+    render_bar_chart(left_col)
+    render_pie_chart(right_col)
+elif chart_view == "Bar Chart Only":
+    render_bar_chart(st.container())
+elif chart_view == "Pie Chart Only":
+    render_pie_chart(st.container())
 
 # ==============================================================================
 # Enterprise Data Explorer & Audit Records
